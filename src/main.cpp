@@ -8,53 +8,8 @@
 #include <queue>
 #include <sstream>
 
-class PathDataSender final : public Newton::DataSender
-{
-public:
-  PathDataSender(const char* pathString) : m_pathString(pathString) {}
-
-  Newton::ByteBuffer ConvertToBytes() override
-  {
-    unsigned length = std::strlen(m_pathString);
-    return { m_pathString, length };
-  }
-
-private:
-  const char* m_pathString;
-};
-
 std::mutex g_accessToPrint;
 std::queue<std::string> g_toPrint;
-
-class StringMessageReciever final : public Newton::DataReciever
-{
-public:
-  StringMessageReciever(std::atomic<bool>& blocker, Newton::Socket s) : m_blocker(blocker) {}
-
-  bool InterpretBytes(Newton::WriteableByteBuffer data) override
-  {
-    char* msg = data.m_ptr;
-    msg[data.m_size] = 0;
-
-    std::lock_guard<std::mutex> guard(g_accessToPrint); // Automatically unlocks when destructed
-    g_toPrint.emplace(msg);
-
-    return true;
-  }
-
-  bool OnFinRecieved() override
-  {
-    return false;
-  }
-
-  void OnPacketRecieved() override
-  {
-  }
-
-private:
-  std::atomic<bool>& m_blocker;
-};
-
 
 class HTTPGETRequestSender final : public Newton::DataSender
 {
@@ -66,7 +21,7 @@ public:
   {
     std::string HTTP_HEADER;
     HTTP_HEADER += "GET " + m_location + " HTTP/1.1\n";
-    HTTP_HEADER += "Host: " + m_host + "\n\n";
+    HTTP_HEADER += "Host: " + m_host + "\n\r\n\r\n";
 
     m_d = new char[HTTP_HEADER.length() + 1];
     std::strcpy(m_d, HTTP_HEADER.c_str());
@@ -82,7 +37,7 @@ private:
 class HTTPRequestResponseReciever final : public Newton::DataReciever
 {
 public:
-  HTTPRequestResponseReciever(std::atomic<bool>& blocker, Newton::Socket s, std::function<void(std::string)> onPacketRecieved) : m_blocker(blocker),  m_onPacketRecieved(onPacketRecieved) {}
+  HTTPRequestResponseReciever(std::function<void(std::string)> onPacketRecieved) : m_onPacketRecieved(onPacketRecieved) {}
 
   bool InterpretBytes(Newton::WriteableByteBuffer data) override
   {
@@ -107,7 +62,6 @@ public:
   std::string m_buff;
 private:
   std::function<void(std::string)> m_onPacketRecieved;
-  std::atomic<bool>& m_blocker;
 };
 
 
@@ -167,8 +121,7 @@ public:
     err = Newton::SendData(s, std::make_shared<ProxyForwarding>(m_buff));
     err = Newton::ShutdownOutput(s);
 
-    std::atomic<bool> blocker(true);
-    Newton::BlockingExpectData(s, std::make_shared<HTTPRequestResponseReciever>(blocker, s, [=](std::string str)
+    Newton::BlockingExpectData(s, std::make_shared<HTTPRequestResponseReciever>([=](std::string str)
     {
       Newton::SendData(m_s, std::make_shared<ProxyForwarding>(str));
       using namespace std::chrono_literals;
@@ -207,10 +160,26 @@ int main(int argc, char** argv)
   Newton::AutoReturnCodeReactor err(true, Newton::AutoReturnCodeReactor::HandleStrategy::ASSERT);
 
   err = Newton::Initilize();
-  Newton::Socket s = Newton::CreateSocket(80);
+  
+#if 0
+  Newton::Socket s = Newton::CreateSocket();
+  Newton::IPV4Rep rep = Newton::IPV4Rep::IPAddr("127.0.0.1", 80);
+  Newton::ConnectSocketTo(s, rep);
 
-  std::atomic<bool> blocker(true);
-  Newton::BlockingHost(s, SOMAXCONN, std::make_shared<ProxyRequestRecievedFactory>()); // Host is listening so it is blocking.
+  
+  Newton::SendData(s, std::make_shared<HTTPGETRequestSender>("www.bbc.com", "/"));
+
+
+  Newton::BlockingExpectData(s, std::make_shared<HTTPRequestResponseReciever>([](std::string httpPacket) {
+    std::cout << httpPacket;
+  }));
+
+#else
+
+  Newton::Socket s = Newton::CreateSocket(80);
+  Newton::BlockingHost(s, SOMAXCONN, std::make_shared<ProxyRequestRecievedFactory>(), true); // Host is listening so it is blocking.
+
+#endif
 
   err = Newton::CloseSocket(s);
   err = Newton::Clean();
